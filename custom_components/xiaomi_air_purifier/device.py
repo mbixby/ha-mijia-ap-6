@@ -10,12 +10,12 @@ from miio import DeviceException, DeviceInfo, MiotDevice
 
 from .const import (
     AIR_QUALITY_LABELS,
-    DEVICE_TO_FAN_LEVEL,
-    FAN_LEVEL_TO_DEVICE,
+    FAVORITE_SPEEDS,
     MIOT_MAPPING,
-    MODE_TO_PRESET,
+    MODE_AUTO,
+    MODE_FAVORITE,
     MODEL,
-    PRESET_TO_MODE,
+    PRESET_MODE_AUTO,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class AirPurifierStatus:
     power: bool | None = None
     fault: int | None = None
     mode: int | None = None
-    fan_level: int | None = None  # Human-facing 1/2/3
+    favorite_speed: int | None = None
     anion: bool | None = None
     uv: bool | None = None
     humidity: int | None = None
@@ -45,16 +45,14 @@ class AirPurifierStatus:
     motor_speed: int | None = None
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
         """Return True when the purifier is powered on."""
-        return bool(self.power)
+        return self.power
 
     @property
     def preset_mode(self) -> str | None:
         """Return the HA preset mode name for the current device mode."""
-        if self.mode is None:
-            return None
-        return MODE_TO_PRESET.get(self.mode)
+        return PRESET_MODE_AUTO if self.power and self.mode == MODE_AUTO else None
 
     @property
     def air_quality_label(self) -> str | None:
@@ -115,16 +113,11 @@ class XiaomiAirPurifier:
             if prop.get("code", -1) == 0
         }
 
-        device_fan = raw.get("fan_level")
-        fan_level = (
-            DEVICE_TO_FAN_LEVEL.get(device_fan) if isinstance(device_fan, int) else None
-        )
-
         return AirPurifierStatus(
             power=raw.get("power"),
             fault=raw.get("fault"),
             mode=raw.get("mode"),
-            fan_level=fan_level,
+            favorite_speed=raw.get("favorite_speed"),
             anion=raw.get("anion"),
             uv=raw.get("uv"),
             humidity=raw.get("humidity"),
@@ -145,19 +138,18 @@ class XiaomiAirPurifier:
         """Turn the purifier on or off."""
         self._set_property("power", on)
 
-    def set_fan_level(self, level: int) -> None:
-        """Set fan level (1, 2, or 3)."""
-        if level not in FAN_LEVEL_TO_DEVICE:
-            raise ValueError(
-                f"Invalid fan level {level}; expected one of {list(FAN_LEVEL_TO_DEVICE)}"
-            )
-        self._set_property("fan_level", FAN_LEVEL_TO_DEVICE[level])
+    def set_favorite_speed(self, speed: int) -> None:
+        """Set the manual speed and select favorite mode."""
+        if speed not in FAVORITE_SPEEDS:
+            raise ValueError(f"Invalid favorite speed: {speed}")
+        self._set_property("mode", MODE_FAVORITE)
+        self._set_property("favorite_speed", speed)
 
     def set_preset_mode(self, preset: str) -> None:
         """Set operation mode from a preset name."""
-        if preset not in PRESET_TO_MODE:
+        if preset != PRESET_MODE_AUTO:
             raise ValueError(f"Unknown preset mode: {preset}")
-        self._set_property("mode", PRESET_TO_MODE[preset])
+        self._set_property("mode", MODE_AUTO)
 
     def set_anion(self, on: bool) -> None:
         """Enable or disable anion (ionizer)."""
@@ -177,3 +169,10 @@ class XiaomiAirPurifier:
             raise DeviceException(f"Unknown property: {name}")
         result = self._device.set_property(name, value)
         _LOGGER.debug("set_property %s=%s -> %s", name, value, result)
+        if (
+            not isinstance(result, list)
+            or len(result) != 1
+            or not isinstance(result[0], dict)
+            or result[0].get("code") != 0
+        ):
+            raise DeviceException(f"Failed to set {name}: {result}")

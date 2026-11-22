@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from miio import DeviceException
@@ -10,26 +9,23 @@ from miio import DeviceException
 from homeassistant.components.fan import FanEntity, FanEntityFeature
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util.percentage import (
     ordered_list_item_to_percentage,
     percentage_to_ordered_list_item,
 )
 
 from . import XiaomiAirPurifierConfigEntry
-from .const import FAN_LEVELS, PRESET_MODES
+from .const import FAVORITE_SPEEDS, MODE_FAVORITE, PRESET_MODE_AUTO
 from .entity import XiaomiAirPurifierEntity
 
-_LOGGER = logging.getLogger(__name__)
-
-# Named speeds corresponding to device fan levels 1/2/3
-ORDERED_NAMED_FAN_SPEEDS = [str(level) for level in FAN_LEVELS]
+ORDERED_FAVORITE_SPEEDS = list(FAVORITE_SPEEDS)
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: XiaomiAirPurifierConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the air purifier fan entity."""
     coordinator = entry.runtime_data
@@ -47,8 +43,8 @@ class XiaomiAirPurifierFan(XiaomiAirPurifierEntity, FanEntity):
         | FanEntityFeature.TURN_ON
         | FanEntityFeature.TURN_OFF
     )
-    _attr_preset_modes = list(PRESET_MODES)
-    _attr_speed_count = len(ORDERED_NAMED_FAN_SPEEDS)
+    _attr_preset_modes = [PRESET_MODE_AUTO]
+    _attr_speed_count = len(ORDERED_FAVORITE_SPEEDS)
 
     def __init__(self, coordinator) -> None:
         """Initialize the fan entity."""
@@ -64,12 +60,16 @@ class XiaomiAirPurifierFan(XiaomiAirPurifierEntity, FanEntity):
 
     @property
     def percentage(self) -> int | None:
-        """Return the current fan level as a percentage."""
+        """Return the manual speed as a percentage."""
         status = self.coordinator.data
-        if status is None or not status.is_on or status.fan_level is None:
-            return 0 if status and not status.is_on else None
+        if status is None or status.is_on is None:
+            return None
+        if not status.is_on:
+            return 0
+        if status.mode != MODE_FAVORITE or status.favorite_speed not in FAVORITE_SPEEDS:
+            return None
         return ordered_list_item_to_percentage(
-            ORDERED_NAMED_FAN_SPEEDS, str(status.fan_level)
+            ORDERED_FAVORITE_SPEEDS, status.favorite_speed
         )
 
     @property
@@ -86,7 +86,14 @@ class XiaomiAirPurifierFan(XiaomiAirPurifierEntity, FanEntity):
         **kwargs: Any,
     ) -> None:
         """Turn the purifier on, optionally setting speed or preset."""
+        if percentage == 0 and preset_mode is None:
+            await self.async_turn_off()
+            return
         try:
+            if preset_mode is not None and preset_mode != PRESET_MODE_AUTO:
+                raise ValueError(f"Unknown preset mode: {preset_mode}")
+            if preset_mode is None and percentage is not None:
+                self._validate_percentage(percentage)
             await self.hass.async_add_executor_job(self._device.set_power, True)
             if preset_mode is not None:
                 await self.hass.async_add_executor_job(
@@ -107,31 +114,46 @@ class XiaomiAirPurifierFan(XiaomiAirPurifierEntity, FanEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_set_percentage(self, percentage: int) -> None:
-        """Set fan speed percentage (maps to levels 1–3)."""
+        """Set the manual fan speed percentage."""
         if percentage == 0:
             await self.async_turn_off()
             return
         try:
+            self._validate_percentage(percentage)
+            await self._async_ensure_on()
             await self._async_set_percentage(percentage)
         except (DeviceException, ValueError) as err:
-            raise HomeAssistantError(f"Failed to set fan level: {err}") from err
+            raise HomeAssistantError(f"Failed to set fan speed: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def _async_set_percentage(self, percentage: int) -> None:
-        """Map percentage to a named fan level and send to the device."""
-        level_str = percentage_to_ordered_list_item(
-            ORDERED_NAMED_FAN_SPEEDS, percentage
+        """Map percentage to a favorite speed and send it to the device."""
+        speed = percentage_to_ordered_list_item(
+            ORDERED_FAVORITE_SPEEDS, percentage
         )
-        await self.hass.async_add_executor_job(
-            self._device.set_fan_level, int(level_str)
-        )
+        await self.hass.async_add_executor_job(self._device.set_favorite_speed, speed)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set the operation mode preset."""
         try:
+            if preset_mode != PRESET_MODE_AUTO:
+                raise ValueError(f"Unknown preset mode: {preset_mode}")
+            await self._async_ensure_on()
             await self.hass.async_add_executor_job(
                 self._device.set_preset_mode, preset_mode
             )
         except (DeviceException, ValueError) as err:
             raise HomeAssistantError(f"Failed to set preset mode: {err}") from err
         await self.coordinator.async_request_refresh()
+
+    @staticmethod
+    def _validate_percentage(percentage: int) -> None:
+        """Reject percentages outside the manual speed range."""
+        if not 1 <= percentage <= 100:
+            raise ValueError(f"Invalid fan percentage: {percentage}")
+
+    async def _async_ensure_on(self) -> None:
+        """Power on the purifier if necessary."""
+        status = self.coordinator.data
+        if status is None or status.is_on is not True:
+            await self.hass.async_add_executor_job(self._device.set_power, True)

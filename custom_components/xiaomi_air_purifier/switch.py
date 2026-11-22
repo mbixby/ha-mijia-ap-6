@@ -12,7 +12,7 @@ from miio import DeviceException
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import XiaomiAirPurifierConfigEntry
 from .device import AirPurifierStatus, XiaomiAirPurifier
@@ -54,7 +54,7 @@ SWITCHES: tuple[XiaomiAirPurifierSwitchEntityDescription, ...] = (
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: XiaomiAirPurifierConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up air purifier switch entities."""
     coordinator = entry.runtime_data
